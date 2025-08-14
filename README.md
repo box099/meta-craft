@@ -1,2 +1,382 @@
-# meta-craft
-my first Minecraft like game 
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>MiniCraft – Simple Voxel Builder</title>
+  <style>
+    html, body { height: 100%; margin: 0; overflow: hidden; font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, 'Helvetica Neue', Arial, 'Noto Sans', 'Apple Color Emoji', 'Segoe UI Emoji'; }
+    #hud { position: fixed; top: 12px; left: 12px; background: rgba(0,0,0,.45); color: #fff; padding: 12px 14px; border-radius: 12px; line-height: 1.25; backdrop-filter: blur(6px); box-shadow: 0 6px 20px rgba(0,0,0,.25); max-width: 380px; }
+    #hud h1 { margin: 0 0 6px; font-size: 16px; }
+    #hud p { margin: 4px 0; font-size: 13px; }
+    #crosshair { position: fixed; left: 50%; top: 50%; width: 16px; height: 16px; margin-left:-8px; margin-top:-8px; pointer-events:none; }
+    #crosshair::before, #crosshair::after { content:""; position:absolute; background:#fff; opacity:.85; }
+    #crosshair::before { left:7px; top:0; width:2px; height:16px; }
+    #crosshair::after { top:7px; left:0; height:2px; width:16px; }
+    #hotbar { position: fixed; left:50%; bottom: 20px; transform: translateX(-50%); display:flex; gap:8px; }
+    .slot { width: 48px; height: 48px; border-radius: 10px; border:2px solid rgba(255,255,255,.7); background: rgba(0,0,0,.35); display:flex; align-items:center; justify-content:center; color:#fff; font-size:12px; position:relative; }
+    .slot.selected { outline: 2px solid #fff; box-shadow: 0 0 0 2px rgba(255,255,255,.75) inset; }
+    .swatch { width: 30px; height: 30px; border-radius:6px; border:1px solid rgba(255,255,255,.6); }
+    #tip { position:fixed; right:12px; top:12px; background: rgba(0,0,0,.45); color:#fff; padding:10px 12px; border-radius:12px; font-size:12px; max-width:320px; }
+    a { color: #9ad3ff; }
+    #lockOverlay { position:fixed; inset:0; display:flex; align-items:center; justify-content:center; background: radial-gradient(1200px 800px at 50% 50%, rgba(0,0,0,.4), rgba(0,0,0,.7)); color:#fff; }
+    #lockOverlay button { padding:12px 16px; border-radius:12px; border:0; background:#0ea5e9; color:#fff; font-weight:700; cursor:pointer; }
+  </style>
+</head>
+<body>
+  <div id="hud">
+    <h1>MiniCraft – Voxel Builder</h1>
+    <p><b>WASD</b> move · <b>Mouse</b> look (click <i>Lock Pointer</i>) · <b>Space</b> jump · <b>Shift</b> sprint</p>
+    <p><b>Left Click</b> place · <b>Right Click</b> break · <b>1-5</b> choose block · <b>R</b> reset world</p>
+  </div>
+  <div id="tip">Blocks: 1 Grass · 2 Dirt · 3 Stone · 4 Wood · 5 Glass</div>
+  <div id="crosshair"></div>
+  <div id="hotbar"></div>
+  <div id="lockOverlay"><button id="lockBtn">Click to Lock Pointer & Play</button></div>
+
+  <!-- Three.js via module (CDN) -->
+  <script type="module">
+    import * as THREE from 'https://unpkg.com/three@0.160.0/build/three.module.js';
+    import { OrbitControls } from 'https://unpkg.com/three@0.160.0/examples/jsm/controls/OrbitControls.js';
+
+    // ====== Basic Scene Setup ======
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x87ceeb);
+
+    const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+    camera.position.set(8, 12, 18);
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    document.body.appendChild(renderer.domElement);
+
+    // Soft daylight
+    const hemi = new THREE.HemisphereLight(0xffffff, 0x88bbff, 0.8);
+    scene.add(hemi);
+    const dir = new THREE.DirectionalLight(0xffffff, 0.7);
+    dir.position.set(10, 20, 10);
+    dir.castShadow = false;
+    scene.add(dir);
+
+    // ====== Voxel World ======
+    const BLOCK_SIZE = 1;
+    const world = new Map(); // key: "x,y,z" -> mesh
+
+    const palettes = {
+      1: 0x78c850, // grass
+      2: 0x8b5a2b, // dirt
+      3: 0x808080, // stone
+      4: 0x9b7653, // wood
+      5: 0xa0d8ef, // glass
+    };
+
+    let selectedBlock = 1;
+
+    // Geometry & materials (reused)
+    const cubeGeo = new THREE.BoxGeometry(BLOCK_SIZE, BLOCK_SIZE, BLOCK_SIZE);
+    const materials = Object.fromEntries(Object.keys(palettes).map(k => {
+      const id = Number(k);
+      let mat;
+      if (id === 5) {
+        mat = new THREE.MeshPhysicalMaterial({ color: palettes[id], transparent: true, opacity: 0.45, roughness: 0.1, metalness: 0.0 });
+      } else if (id === 1) {
+        // Slight two-tone for grass-like look
+        const matTop = new THREE.MeshStandardMaterial({ color: palettes[1] });
+        const matSide = new THREE.MeshStandardMaterial({ color: 0x6aa84f });
+        const matBottom = new THREE.MeshStandardMaterial({ color: palettes[2] });
+        // Build multi-material box (order: +x, -x, +y, -y, +z, -z)
+        // We'll reuse same geometry but assign per-face materials via groups
+        const geo = cubeGeo.clone();
+        const mats = [matSide, matSide, matTop, matBottom, matSide, matSide];
+        const mesh = new THREE.Mesh(geo, mats);
+        mesh.userData.isTemplate = true;
+        return [k, { template: mesh }];
+      } else {
+        mat = new THREE.MeshStandardMaterial({ color: palettes[id] });
+      }
+      return [k, { mat }];
+    }));
+
+    function key(x, y, z){ return `${x},${y},${z}`; }
+
+    function addBlock(x, y, z, type = selectedBlock) {
+      const k = key(x,y,z);
+      if (world.has(k)) return; // occupied
+
+      let mesh;
+      if (type === 1 && materials[1].template) {
+        mesh = materials[1].template.clone();
+        mesh.material = materials[1].template.material.map(m => m.clone());
+      } else {
+        mesh = new THREE.Mesh(cubeGeo, materials[type].mat.clone());
+      }
+      mesh.position.set(x + 0.5, y + 0.5, z + 0.5);
+      mesh.userData.type = type;
+      scene.add(mesh);
+      world.set(k, mesh);
+    }
+
+    function removeBlock(x, y, z) {
+      const k = key(x,y,z);
+      const m = world.get(k);
+      if (!m) return;
+      scene.remove(m);
+      m.geometry.dispose();
+      if (Array.isArray(m.material)) m.material.forEach(mat => mat.dispose()); else m.material.dispose();
+      world.delete(k);
+    }
+
+    // ====== Flat ground with slight hills ======
+    function generateWorld(seed = 1) {
+      // Simple pseudo-random height via sine waves (fast, no noise lib)
+      const size = 32; // 32x32 area
+      const base = 6;
+      for (let x = 0; x < size; x++) {
+        for (let z = 0; z < size; z++) {
+          const gx = x - size/2;
+          const gz = z - size/2;
+          const h = Math.floor(base + 2*Math.sin((gx+seed)*0.25) + 2*Math.cos((gz-seed)*0.25));
+          // stack dirt/stone, grass on top
+          for (let y = 0; y < h-1; y++) addBlock(gx, y, gz, 2); // dirt
+          addBlock(gx, h-1, gz, 1); // grass cap
+          if (Math.random() < 0.02) addTree(gx, h, gz);
+        }
+      }
+    }
+
+    function addTree(x, y, z) {
+      // simple 1x1 trunk and 3x3x3 leaves blob
+      for (let i=0;i<3;i++) addBlock(x, y+i, z, 4);
+      for (let dx=-1; dx<=1; dx++)
+        for (let dy=1; dy<=3; dy++)
+          for (let dz=-1; dz<=1; dz++)
+            if (!(dx===0 && dy===1 && dz===0)) addBlock(x+dx, y+dy, z+dz, 1);
+    }
+
+    generateWorld(7);
+
+    // ====== Controls (pointer lock + basic physics) ======
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enablePan = false;
+    controls.enableZoom = false;
+    controls.enableDamping = true;
+    controls.minPolarAngle = Math.PI * 0.1;
+    controls.maxPolarAngle = Math.PI * 0.9;
+
+    let pointerLocked = false;
+    const lockBtn = document.getElementById('lockBtn');
+    const overlay = document.getElementById('lockOverlay');
+
+    lockBtn.addEventListener('click', () => {
+      renderer.domElement.requestPointerLock();
+    });
+
+    document.addEventListener('pointerlockchange', () => {
+      pointerLocked = (document.pointerLockElement === renderer.domElement);
+      overlay.style.display = pointerLocked ? 'none' : 'flex';
+      controls.enabled = !pointerLocked; // Use our own look when locked
+    });
+
+    // FPS look
+    let yaw = 0, pitch = 0;
+    const lookSpeed = 0.0028;
+    document.addEventListener('mousemove', (e) => {
+      if (!pointerLocked) return;
+      yaw -= e.movementX * lookSpeed;
+      pitch -= e.movementY * lookSpeed;
+      const maxPitch = Math.PI/2 - 0.05;
+      pitch = Math.max(-maxPitch, Math.min(maxPitch, pitch));
+      const dir = new THREE.Vector3(
+        Math.sin(yaw) * Math.cos(pitch),
+        Math.sin(pitch),
+        Math.cos(yaw) * Math.cos(pitch)
+      );
+      camera.lookAt(camera.position.clone().add(dir));
+    });
+
+    const keys = new Set();
+    document.addEventListener('keydown', (e) => {
+      if (['KeyW','KeyA','KeyS','KeyD','ShiftLeft','Space','Digit1','Digit2','Digit3','Digit4','Digit5','KeyR'].includes(e.code)) e.preventDefault();
+      keys.add(e.code);
+      if (e.code.startsWith('Digit')) {
+        const num = Number(e.code.replace('Digit',''));
+        if (palettes[num]) setSelected(num);
+      }
+      if (e.code === 'KeyR') resetWorld();
+    });
+    document.addEventListener('keyup', (e) => keys.delete(e.code));
+
+    let velocity = new THREE.Vector3();
+    let onGround = false;
+    const gravity = -24; // m/s^2-ish
+    const moveSpeed = 8; // m/s
+    const jumpSpeed = 8.5;
+
+    // Simple AABB collision against voxels
+    const playerSize = new THREE.Vector3(0.6, 1.8, 0.6);
+
+    function aabbIntersectsVoxel(pos) {
+      // Check if any voxel overlaps player's AABB
+      const min = new THREE.Vector3().copy(pos).addScaledVector(playerSize, -0.5);
+      const max = new THREE.Vector3().copy(pos).addScaledVector(playerSize, 0.5);
+      const x0 = Math.floor(min.x), x1 = Math.floor(max.x);
+      const y0 = Math.floor(min.y), y1 = Math.floor(max.y);
+      const z0 = Math.floor(min.z), z1 = Math.floor(max.z);
+      for (let x=x0; x<=x1; x++)
+        for (let y=y0; y<=y1; y++)
+          for (let z=z0; z<=z1; z++) {
+            if (world.has(key(x,y,z))) return true;
+          }
+      return false;
+    }
+
+    function movePlayer(dt) {
+      const forward = new THREE.Vector3( Math.sin(yaw), 0, Math.cos(yaw) );
+      const right = new THREE.Vector3().crossVectors(forward, new THREE.Vector3(0,1,0)).negate();
+
+      let input = new THREE.Vector3();
+      if (keys.has('KeyW')) input.add(forward);
+      if (keys.has('KeyS')) input.add(forward.clone().negate());
+      if (keys.has('KeyA')) input.add(right.clone().negate());
+      if (keys.has('KeyD')) input.add(right);
+      if (input.lengthSq() > 0) input.normalize();
+
+      const sprint = keys.has('ShiftLeft') ? 1.6 : 1;
+      const accel = input.multiplyScalar(moveSpeed * sprint);
+      velocity.x = accel.x; velocity.z = accel.z;
+
+      // gravity
+      velocity.y += gravity * dt;
+
+      // jumping
+      if (keys.has('Space') && onGround) {
+        velocity.y = jumpSpeed;
+        onGround = false;
+      }
+
+      // integrate with collision resolution (sweep axes)
+      const next = camera.position.clone();
+      // X
+      next.x += velocity.x * dt;
+      if (aabbIntersectsVoxel(next)) {
+        // push back
+        next.x -= velocity.x * dt;
+        velocity.x = 0;
+      }
+      // Y
+      next.y += velocity.y * dt;
+      if (aabbIntersectsVoxel(next)) {
+        next.y -= velocity.y * dt;
+        if (velocity.y < 0) onGround = true;
+        velocity.y = 0;
+      } else {
+        onGround = false;
+      }
+      // Z
+      next.z += velocity.z * dt;
+      if (aabbIntersectsVoxel(next)) {
+        next.z -= velocity.z * dt;
+        velocity.z = 0;
+      }
+
+      camera.position.copy(next);
+    }
+
+    // Set initial camera height above terrain
+    camera.position.set(0.5, 14, 6.5);
+    yaw = Math.PI; // face -Z initially
+
+    // ====== Build / Break with Raycast ======
+    const raycaster = new THREE.Raycaster();
+    const placeDistance = 6;
+
+    function getTargetedVoxel() {
+      // build a direction vector from camera
+      const dir = new THREE.Vector3();
+      camera.getWorldDirection(dir);
+      raycaster.set(camera.position, dir);
+      const meshes = Array.from(world.values());
+      const hits = raycaster.intersectObjects(meshes, false);
+      if (hits.length === 0 || hits[0].distance > placeDistance) return null;
+      const hit = hits[0];
+      const p = hit.point.clone().add(hit.face.normal.multiplyScalar(0.01));
+      const target = hit.object.position.clone().subScalar(0.5); // voxel grid pos
+      const place = new THREE.Vector3(Math.floor(p.x), Math.floor(p.y), Math.floor(p.z));
+      const remove = new THREE.Vector3(Math.floor(target.x), Math.floor(target.y), Math.floor(target.z));
+      return { place, remove };
+    }
+
+    renderer.domElement.addEventListener('mousedown', (e) => {
+      if (!pointerLocked) return;
+      const target = getTargetedVoxel();
+      if (!target) return;
+      if (e.button === 0) {
+        // place
+        // Don't allow placing inside player body
+        const tmp = camera.position.clone();
+        tmp.y -= (1.8/2 - 0.1);
+        if (key(target.place.x, target.place.y, target.place.z) !== key(Math.floor(tmp.x), Math.floor(tmp.y), Math.floor(tmp.z))) {
+          addBlock(target.place.x, target.place.y, target.place.z, selectedBlock);
+        }
+      } else if (e.button === 2) {
+        // remove
+        removeBlock(target.remove.x, target.remove.y, target.remove.z);
+      }
+    });
+    // prevent context menu on right-click
+    renderer.domElement.addEventListener('contextmenu', e => e.preventDefault());
+
+    // ====== Hotbar UI ======
+    const hotbar = document.getElementById('hotbar');
+    const slots = [1,2,3,4,5];
+    const elements = new Map();
+
+    function setSelected(id){
+      selectedBlock = id;
+      for (const [k, el] of elements) el.classList.toggle('selected', Number(k)===id);
+    }
+
+    for (const id of slots){
+      const el = document.createElement('div');
+      el.className = 'slot' + (id===selectedBlock? ' selected': '');
+      el.innerHTML = `<div class="swatch" style="background:#${palettes[id].toString(16).padStart(6,'0')}"></div>`;
+      hotbar.appendChild(el);
+      elements.set(String(id), el);
+    }
+
+    setSelected(1);
+
+    // ====== Reset world ======
+    function resetWorld(){
+      // remove all
+      for (const m of world.values()) scene.remove(m);
+      world.clear();
+      generateWorld(Math.floor(Math.random()*1000));
+      camera.position.set(0.5, 14, 6.5);
+      velocity.set(0,0,0);
+    }
+
+    // ====== Game Loop ======
+    let last = performance.now();
+    function animate() {
+      requestAnimationFrame(animate);
+      const now = performance.now();
+      const dt = Math.min(0.05, (now - last)/1000);
+      last = now;
+
+      if (pointerLocked) movePlayer(dt);
+      else controls.update();
+
+      renderer.render(scene, camera);
+    }
+    animate();
+
+    // Resize
+    window.addEventListener('resize', () => {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+  </script>
+</body>
+</html>
